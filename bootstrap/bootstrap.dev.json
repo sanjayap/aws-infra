@@ -1,0 +1,34 @@
+[
+    {
+        "ParameterKey": "DeployEnv",
+        "ParameterValue": "dev"
+    },
+    {
+        "ParameterKey": "TerraformBackendBucket",
+        "ParameterValue": "tf-backend.test.com.au"
+    },
+    {
+        "ParameterKey": "TerraformDynamoDBTable",
+        "ParameterValue": "tf-lock"
+    },
+    {
+        "ParameterKey": "InfraPipelineArtifactsBucket",
+        "ParameterValue": "tf-artifacts.test.com.au"
+    },
+    {
+        "ParameterKey": "InfraSourceRepoName",
+        "ParameterValue": "infra-repo"
+    },
+    {
+        "ParameterKey": "InfraSourceBranch",
+        "ParameterValue": "dev"
+    },
+    {
+        "ParameterKey": "CodeBuildLogsRetentionDays",
+        "ParameterValue": "7"
+    },
+    {
+        "ParameterKey": "TerraformVersion",
+        "ParameterValue": "1.0.3"
+    }
+]

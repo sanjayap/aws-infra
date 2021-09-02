@@ -1,0 +1,347 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Bootstrap Template to create initial resources and Infra Pipeline'
+
+
+Parameters:
+  DeployEnv:
+    Type: String
+    Description: Deploy Environment
+  TerraformBackendBucket:
+    Type: String  
+    Description: S3 Bucket for Terraform Backend
+  TerraformDynamoDBTable:
+    Type: String  
+    Description: DynamoDB Table for Terraform Locking
+  InfraPipelineArtifactsBucket:
+    Type: String  
+    Description: S3 Bucket for Codepipeline Artifact Storage
+  InfraSourceRepoName:
+    Type: String
+    Description: Codecommit project repository
+  InfraSourceBranch:
+    Type: String
+    Description: Codecommit trigger branch for this environment
+  CodeBuildLogsRetentionDays:
+    Type: Number
+    Description: Logs retention days for CodeBuild
+  TerraformVersion:
+    Type: String
+    Description: Terraform Version
+
+Resources:
+#------------------------------
+# S3 Buckets
+#------------------------------
+  TerraformBackendS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties: 
+      BucketName: !Ref TerraformBackendBucket
+      BucketEncryption: 
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'AES256'
+    DeletionPolicy: Delete
+
+  InfraPipelineArtifactsS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties: 
+      BucketName: !Ref InfraPipelineArtifactsBucket
+      BucketEncryption: 
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'AES256'
+    DeletionPolicy: Delete
+
+#------------------------------
+# Dynamo DB Tables
+#------------------------------
+  TerraformLockTable:
+    Type: AWS::DynamoDB::Table
+    Properties: 
+      TableName: !Ref TerraformDynamoDBTable
+      AttributeDefinitions: 
+        - 
+          AttributeName: "LockID"
+          AttributeType: "S"
+      KeySchema: 
+        - 
+          AttributeName: "LockID"
+          KeyType: "HASH"
+      BillingMode: "PAY_PER_REQUEST"
+
+#------------------------------
+# IAM Roles
+#------------------------------
+  # Service Role for Code Build with All Permissions (Could Adjust as per requirements)
+  InfraCodeBuildRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: "infra-codebuild-role"
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: InfraCodebuild-Inline-Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: "AllowAllPermissions"
+                Effect: Allow
+                Action:
+                  - '*'
+                Resource: '*'
+
+  # Service role for CodePipeline
+  InfraPipelineRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: "infra-pipeline-role"
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: InfraPipeline-Inline-Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Sid: LogGroupAccess
+                Effect: Allow
+                Action:
+                  - 'logs:Filter*'
+                  - 'logs:PutLogEvents'
+                  - 'logs:CreateLogStream'
+                  - 'logs:CreateLogGroup'
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*"
+
+              - Effect: Allow
+                Action:
+                  - 'codebuild:*'
+                Resource:
+                  - !GetAtt TerraformValidate.Arn
+                  - !GetAtt TerraformPlan.Arn
+                  - !GetAtt TerraformApply.Arn
+            
+              - Effect: Allow
+                Action:
+                  - 'codecommit:Get*'
+                  - 'codecommit:UploadArchive'
+                Resource: !Sub "arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${InfraSourceRepoName}"
+
+              - Effect: Allow
+                Action:
+                  - 's3:GetBucket*'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub "arn:aws:s3:::${InfraPipelineArtifactsBucket}"
+
+              - Sid: S3PipelineArtifactBucketObjectAccess
+                Effect: Allow
+                Action:
+                  - 's3:ListMultipartUploadParts'
+                  - 's3:GetObject*'
+                  - 's3:PutObject*'
+                Resource:
+                  - !Sub "arn:aws:s3:::${InfraPipelineArtifactsBucket}/*"
+
+              - Effect: Allow
+                Action:
+                  - 'iam:PassRole'
+                Resource: '*'
+
+#-----------------------------
+# CodeBuild Logs and Project
+#-----------------------------
+  TerraformPlanLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: '/aws/codebuild/terraform-plan'
+      RetentionInDays: !Ref CodeBuildLogsRetentionDays
+
+  TerraformValidate:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: "InfraTerraformValidate"
+      ServiceRole: !Ref InfraCodeBuildRole
+      TimeoutInMinutes: 10
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Ref TerraformPlanLogGroup
+          Status: ENABLED
+      Environment:
+          ComputeType: BUILD_GENERAL1_SMALL
+          Image : 'aws/codebuild/amazonlinux2-x86_64-standard:3.0'
+          Type: LINUX_CONTAINER
+          EnvironmentVariables:
+            - Name: DEPLOY_ENV
+              Type: PLAINTEXT
+              Value: !Ref DeployEnv
+            - Name: TERRAFORM_VERSION
+              Type: PLAINTEXT
+              Value: !Ref TerraformVersion
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: "./bootstrap/scripts/buildspec_terraform_validate.yml"
+
+  TerraformPlan:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: "InfraTerraformPlan"
+      ServiceRole: !Ref InfraCodeBuildRole
+      TimeoutInMinutes: 10
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Ref TerraformPlanLogGroup
+          Status: ENABLED
+      Environment:
+          ComputeType: BUILD_GENERAL1_SMALL
+          Image : 'aws/codebuild/amazonlinux2-x86_64-standard:3.0'
+          Type: LINUX_CONTAINER
+          EnvironmentVariables:
+            - Name: DEPLOY_ENV
+              Type: PLAINTEXT
+              Value: !Ref DeployEnv
+            - Name: TERRAFORM_VERSION
+              Type: PLAINTEXT
+              Value: !Ref TerraformVersion
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: "./bootstrap/scripts/buildspec_terraform_plan.yml"
+
+  TerraformApplyLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: '/aws/codebuild/terraform-apply'
+      RetentionInDays: !Ref CodeBuildLogsRetentionDays
+
+  TerraformApply:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: "InfraTerraformApply"
+      ServiceRole: !Ref InfraCodeBuildRole
+      TimeoutInMinutes: 10
+      LogsConfig:
+        CloudWatchLogs:
+          GroupName: !Ref TerraformApplyLogGroup
+          Status: ENABLED
+      Environment:
+          ComputeType: BUILD_GENERAL1_SMALL
+          Image : 'aws/codebuild/amazonlinux2-x86_64-standard:3.0'
+          Type: LINUX_CONTAINER
+          PrivilegedMode: true
+          EnvironmentVariables:
+            - Name: DEPLOY_ENV
+              Type: PLAINTEXT
+              Value: !Ref DeployEnv
+            - Name: TERRAFORM_VERSION
+              Type: PLAINTEXT
+              Value: !Ref TerraformVersion
+      Cache:
+        Type: LOCAL
+        Modes:
+          - LOCAL_DOCKER_LAYER_CACHE
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: "./bootstrap/scripts/buildspec_terraform_apply.yml"
+
+  InfraPipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      Name: "InfraTerraformPipeline"
+      RoleArn: !GetAtt InfraPipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref InfraPipelineArtifactsBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: '1'
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: SourceOutput
+              RunOrder: 1
+              Configuration:
+                RepositoryName: !Ref InfraSourceRepoName
+                BranchName: !Ref InfraSourceBranch
+        - Name: Validate
+          Actions:
+            - Name: TerraformValidate
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: TerraformValidateOutput
+              RunOrder: 1
+              Configuration:
+                ProjectName: !Ref TerraformValidate
+        - Name: Plan
+          Actions:
+            - Name: TerraformPlan
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              InputArtifacts:
+                - Name: TerraformValidateOutput
+              OutputArtifacts:
+                - Name: TerraformPlanOutput
+              RunOrder: 2
+              Configuration:
+                ProjectName: !Ref TerraformPlan
+        - Name: ManualApprove
+          Actions:
+            - Name: ManualApprove
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Version: '1'
+                Provider: Manual
+              RunOrder: 3
+              Configuration:
+                CustomData: 'Manual Approval or Reject required'
+        - Name: Deploy
+          Actions:
+            - Name: TerraformApply
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              RunOrder: 4
+              Configuration:
+                ProjectName: !Ref TerraformApply
+              InputArtifacts:
+                - Name: TerraformPlanOutput
+
+
+Outputs:
+  StackName:
+    Description: Infrastructure CICD Pipeline Stack Name
+    Value: !Ref 'AWS::StackName'
+  PipelineUrl:
+    Description: Infrastructure CICD Pipeline Stack URL
+    Value: !Sub "https://console.aws.amazon.com/codepipeline/home?region=${AWS::Region}#/view/${InfraPipeline}"

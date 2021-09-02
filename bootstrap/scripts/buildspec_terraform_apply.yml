@@ -1,0 +1,18 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.7
+    commands:
+      - ls -lh
+      - unzip terraform_"$TERRAFORM_VERSION"_linux_amd64.zip
+      - mv terraform /usr/local/bin/
+      - terraform --version
+  build:
+    commands:
+      - cd $DEPLOY_ENV
+      - terraform --version
+      - terraform init -input=false
+      - export COMMIT_PEFIX=$(cat commit-id.txt | cut -c 1-7)
+      - terraform apply -auto-approve -input=false ${COMMIT_PEFIX}.tfplan
