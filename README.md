@@ -9,6 +9,8 @@
   - AWS CLI
   - AWS profile configured with access keys
 
+- Update the variables in bootstrap.json as per your requirements.
+
 - Execute the following command to deploy the pipeline.
   - cd bootstrap
   - aws cloudformation create-stack --stack-name bootstrap-stack --template-body file://bootstrap.yml --parameters file://bootstrap.json --profile `aws-profile-name` --capabilities CAPABILITY_NAMED_IAM
